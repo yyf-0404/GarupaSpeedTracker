@@ -7,9 +7,15 @@ services:
         image: ghcr.io/starfreedomx/garupa-speed-tracker-backend:latest
         container_name: garupa-speed-backend
         restart: always
+        env_file:
+            - ./backend/.env
         environment:
+            - HOST=0.0.0.0
+            - PORT=5519
             - MONGODB_URI=mongodb://grp-speed-mongodb:27017
             - MONGODB_DB=garupa
+        volumes:
+            - grp-speed-data:/app/data
         depends_on:
             - grp-speed-mongodb
 
@@ -40,3 +46,4 @@ services:
 
 volumes:
     mongo-data:
+    grp-speed-data:

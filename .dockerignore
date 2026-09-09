@@ -1,6 +1,15 @@
 # 忽略所有 node_modules 文件夹（无论在根目录还是子目录）
 **/node_modules
 
+# 环境配置通过 env_file 在运行时注入
+**/.env
+**/.env.local
+
+# 离线历史数据审计文件不进入运行镜像
+backend/data/history-audit*/
+backend/data/top-outbox/
+backend/data/top-v2-migration-*.json
+
 # 忽略构建产物
 **/dist
 **/.next

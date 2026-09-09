@@ -179,11 +179,12 @@ export const getGarupaServerIds = (): number[] =>
 /**
  * Builds the HTTP request headers required by the Garupa API for a given server.
  * Includes User-Agent, Unity version, client platform/version, and optional channel/platform IDs.
+ * CN requests may omit X-Signature when no UUID is configured.
  * @param server - Server index
  * @param clientVersion - Client version string (from live version check or fallback)
  */
 export const createGarupaHeaders = (server: number, clientVersion: string) => {
-    const uuid = getGarupaUuid(server);
+    const uuid = server === 3 ? resolveOptionalServerValue(GARUPA_UUIDS, server) : getGarupaUuid(server);
     const channelId = getGarupaChannelId(server);
     const platformId = getGarupaPlatformId(server);
 
@@ -192,12 +193,12 @@ export const createGarupaHeaders = (server: number, clientVersion: string) => {
         "X-Unity-Version": getGarupaUnityVersion(server),
         "X-ClientPlatform": getGarupaClientPlatform(server),
         "X-ClientVersion": clientVersion,
-        "X-Signature": uuid,
         "Accept-Encoding": "deflate, gzip",
         "Content-Type": "application/octet-stream",
         Accept: "application/octet-stream",
     };
 
+    if (uuid) headers["X-Signature"] = uuid;
     if (channelId) headers["X-ChannelID"] = channelId;
     if (platformId) headers["X-PlatformID"] = platformId;
 

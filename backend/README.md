@@ -41,6 +41,20 @@ pnpm start
 ```
 
 ## 后端环境变量说明
+
+只部署后端并连接已有 MongoDB 时，在项目根目录执行：
+
+```shell
+cp backend/.env.example backend/.env # 尚未创建配置文件时执行
+# 编辑 backend/.env，填写现有 MONGODB_URI 和需要启用的区服配置
+docker compose -f docker-compose.backend.yml up -d --build
+```
+
+该部署文件读取 `backend/.env`，发布后端端口 `5519`，通过 `MONGODB_URI` 连接已有 MongoDB，使用 `garupa` 数据库。
+区服配置按日服、国际服、台服、国服排序，不启用的区服用 `-` 占位。
+国服的 `GARUPA_UUIDS` 可填 `-`，此时省略 `X-Signature` 请求头。
+完整部署文件 `docker-compose.yml` 同样读取 `backend/.env` 并持久化 `/app/data`，MongoDB 连接则使用其内置服务。
+
 | 变量名                                               | 默认值                                    | 作用                                    |
 |---------------------------------------------------|----------------------------------------|---------------------------------------|
 | `HOST`                                            | `127.0.0.1`（本地）<br/> `0.0.0.0`（Docker） | 后端监听地址                                |
@@ -187,3 +201,7 @@ GET /api/playerDeckStatus?server=0&playerId=28012549
   ]
 }
 ```
+
+## 前十 10 秒采样
+
+已支持独立的 FULL/PATCH/SAME/GAP 事件存储，每个 UTC 小时首次成功采样写入 FULL 检查点。启用参数、持久化队列、旧历史兼容与新查询接口见 [Top 历史 V2](TOP_HISTORY_V2_DESIGN.md)。运行时须为 `/app/data` 挂载持久卷；旧历史迁移后保留原集合。

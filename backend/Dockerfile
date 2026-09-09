@@ -1,8 +1,8 @@
 # --- 阶段 1: 构建 ---
 FROM node:22-alpine AS builder
 
-# 安装 pnpm
-RUN npm install -g pnpm
+# 与 package.json 中声明的包管理器版本保持一致
+RUN npm install -g pnpm@10.28.2
 
 WORKDIR /app
 
@@ -30,6 +30,9 @@ RUN adduser -D -u 1000 node || true
 
 # 拷贝阶段 2 的产物
 COPY --from=builder --chown=node:node /app/backend ./
+
+# Docker 初始化命名卷时保留 node 用户对持久化队列目录的写权限。
+RUN mkdir -p /app/data && chown node:node /app/data
 
 USER node
 
