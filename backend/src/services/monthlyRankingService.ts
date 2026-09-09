@@ -1,5 +1,6 @@
 import { fetchMonthlyRanking } from "@/api/garupa";
 import {
+    BORDER_PERSIST_INTERVAL_MS,
     MONGODB_GARUPA_META_COLLECTION,
     MONGODB_MONTHLY_BORDER_POINTS_COLLECTION,
     MONGODB_MONTHLY_TOP_POINTS_COLLECTION,
@@ -7,6 +8,9 @@ import {
     MONTHLY_POST_END_MAX_DURATION_MS,
     MONTHLY_POST_END_POLL_INTERVAL_MS,
     MONTHLY_RANKING_REFRESH_INTERVAL_MS,
+    MONTHLY_TOP_POLL_INTERVAL_MS,
+    TOP_HISTORY_V2_ENABLED,
+    TOP_POLL_PHASE_OFFSET_MS,
 } from "@/config";
 import { logger } from "@/logger";
 import { garupaService } from "@/services/garupaService";
@@ -23,6 +27,8 @@ import type {
     MonthlyRankingTopResponse,
 } from "@/types/monthlyRanking";
 import type { RankingPlayerDocument, RankingUser } from "@/types/rankingUser";
+import { ThrottledTask } from "./throttledTask";
+import { topHistoryService } from "./topHistoryService";
 
 const topCollection = database.collection<MonthlyRankingTopDocument>(MONGODB_MONTHLY_TOP_POINTS_COLLECTION);
 const borderCollection = database.collection<MonthlyRankingBorderDocument>(MONGODB_MONTHLY_BORDER_POINTS_COLLECTION);
@@ -68,6 +74,7 @@ export const getMonthlyRankingServerCount = (): number => garupaService.getServe
  * bootstrap check that backfills any missing monthly data.
  */
 class MonthlyRankingService {
+    private auxiliaryWrites = new ThrottledTask();
     private postEndLastFetch = new Map<string, number>();
 
     constructor() {
@@ -80,7 +87,13 @@ class MonthlyRankingService {
      */
     start(): void {
         garupaService.start();
-        garupaService.registerPoller("monthlyRanking", async () => this.refreshAll(), MONTHLY_RANKING_REFRESH_INTERVAL_MS);
+        if (TOP_HISTORY_V2_ENABLED) topHistoryService.start();
+        garupaService.registerPoller(
+            "monthlyRanking",
+            async (at) => this.refreshAll(at),
+            TOP_HISTORY_V2_ENABLED ? MONTHLY_TOP_POLL_INTERVAL_MS : MONTHLY_RANKING_REFRESH_INTERVAL_MS,
+            TOP_HISTORY_V2_ENABLED ? TOP_POLL_PHASE_OFFSET_MS : undefined,
+        );
     }
 
     /**
@@ -207,7 +220,7 @@ class MonthlyRankingService {
                 for (let id = 1; id <= currentMonthlyId; id++) {
                     const exists = await topCollection.findOne({ server, monthlyId: id }, { projection: { _id: 1 } });
 
-                    if (!exists) {
+                    if (!exists && !(TOP_HISTORY_V2_ENABLED && (await topHistoryService.store.hasHistory(`${server}/m/${id}`)))) {
                         missingIds.push(id);
                     }
                 }
@@ -256,13 +269,13 @@ class MonthlyRankingService {
      * and refreshes ranking data. Uses {@link Promise.allSettled} so that
      * a failure on one server does not block others.
      */
-    async refreshAll(): Promise<void> {
-        const servers = garupaService.getActiveServerIds();
+    async refreshAll(scheduledAt?: number): Promise<void> {
+        const servers = TOP_HISTORY_V2_ENABLED ? garupaService.getConfiguredServerIds() : garupaService.getActiveServerIds();
         await Promise.allSettled(
             servers.map(async (server) => {
                 const monthlyId = await monthlyRankingInfoService.getActiveMonthlyId(server);
                 if (monthlyId) {
-                    await this.refreshServer(server, monthlyId);
+                    await this.refreshServer(server, monthlyId, scheduledAt);
                 } else {
                     await this.refreshPostEndIfNeeded(server);
                 }
@@ -279,7 +292,8 @@ class MonthlyRankingService {
      * @param server    The game server identifier
      * @param monthlyId The monthly ranking identifier
      */
-    async refreshServer(server: number, monthlyId: number): Promise<void> {
+    async refreshServer(server: number, monthlyId: number, scheduledAt?: number): Promise<void> {
+        if (TOP_HISTORY_V2_ENABLED) return this.refreshV2(server, monthlyId, scheduledAt);
         await garupaService.runWithAvailability(
             server,
             async () => {
@@ -299,6 +313,30 @@ class MonthlyRankingService {
                 return;
             },
             { timeoutMs: 2000 },
+        );
+    }
+
+    private async refreshV2(server: number, monthlyId: number, scheduledAt?: number, endAt?: number): Promise<void> {
+        const boundary = endAt ?? (await monthlyRankingInfoService.getMonthlyRankingDetail(monthlyId))?.endAt?.[server] ?? undefined;
+        if (boundary !== undefined && Date.now() >= boundary) endAt = boundary;
+        const intervalMs = endAt === undefined ? MONTHLY_TOP_POLL_INTERVAL_MS : MONTHLY_POST_END_POLL_INTERVAL_MS;
+        const raw = await topHistoryService.capture(
+            { server, kind: "monthly", periodId: monthlyId },
+            () =>
+                garupaService.runWithAvailability(server, () => fetchMonthlyRanking(server, monthlyId, getClientVersion(server)), {
+                    timeoutMs: 2000,
+                    waitForRecovery: false,
+                }),
+            (response) => response.monthlyRankingPointTopUsers,
+            { intervalMs, scheduledAt, effectiveAt: boundary },
+        );
+        if (!raw) return;
+        if (boundary !== undefined && Date.now() >= boundary) endAt = boundary;
+        const timestamp = endAt ?? Date.now();
+        this.auxiliaryWrites.run(`${server}/m/${monthlyId}`, endAt === undefined ? BORDER_PERSIST_INTERVAL_MS : intervalMs, () =>
+            endAt === undefined
+                ? this.persistBorderByTier(server, monthlyId, timestamp, raw)
+                : this.persistBorderByTierReplace(server, monthlyId, timestamp, raw),
         );
     }
 
@@ -332,6 +370,7 @@ class MonthlyRankingService {
     private async refreshServerPostEnd(server: number, monthlyId: number, endAt: number): Promise<void> {
         const key = `${server}-${monthlyId}`;
         this.postEndLastFetch.set(key, Date.now());
+        if (TOP_HISTORY_V2_ENABLED) return this.refreshV2(server, monthlyId, undefined, endAt);
 
         await garupaService.runWithAvailability(
             server,
@@ -358,7 +397,8 @@ class MonthlyRankingService {
      * @returns Combined points array and player metadata
      */
     async getTopSnapshot(server: number, monthlyId: number): Promise<MonthlyRankingTopResponse> {
-        return buildTopSnapshot(topCollection, playerCollection, { server, monthlyId }, server);
+        const legacy = () => buildTopSnapshot(topCollection, playerCollection, { server, monthlyId }, server);
+        return TOP_HISTORY_V2_ENABLED ? topHistoryService.compatible({ server, kind: "monthly", periodId: monthlyId }, legacy) : legacy();
     }
 
     /**

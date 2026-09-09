@@ -1,14 +1,17 @@
 import { fetchEventRanking } from "@/api/garupa";
 import {
     BESTDORI_API,
+    BORDER_PERSIST_INTERVAL_MS,
     EVENT_POST_END_MAX_DURATION_MS,
     EVENT_POST_END_POLL_INTERVAL_MS,
     EVENT_RANKING_REFRESH_INTERVAL_MS,
+    EVENT_TOP_POLL_INTERVAL_MS,
     MONGODB_EVENT_BORDER_POINTS_COLLECTION,
     MONGODB_EVENT_TOP_POINTS_COLLECTION,
     MONGODB_MUSIC_BORDER_POINTS_COLLECTION,
     MONGODB_MUSIC_TOP_POINTS_COLLECTION,
     MONGODB_RANKING_PLAYERS_COLLECTION,
+    TOP_HISTORY_V2_ENABLED,
 } from "@/config";
 import { logger } from "@/logger";
 import { eventInfoService } from "@/services/eventInfoService";
@@ -32,6 +35,8 @@ import type {
     MusicRankingTopResponse,
 } from "@/types/event";
 import type { RankingPlayerDocument, RankingUser } from "@/types/rankingUser";
+import { ThrottledTask } from "./throttledTask";
+import { topHistoryService } from "./topHistoryService";
 
 // ============================================================================
 // Collections
@@ -106,6 +111,7 @@ const buildMusicBorderBuckets = (
  * active event data from the Bestdori API as a bootstrap step.
  */
 class EventRankingService {
+    private auxiliaryWrites = new ThrottledTask();
     /** Last post-end fetch timestamp per server-event key ("{server}-{eventId}"). */
     private postEndLastFetch = new Map<string, number>();
 
@@ -119,7 +125,12 @@ class EventRankingService {
      */
     start(): void {
         garupaService.start();
-        garupaService.registerPoller("eventRanking", async () => this.refreshAll(), EVENT_RANKING_REFRESH_INTERVAL_MS);
+        if (TOP_HISTORY_V2_ENABLED) topHistoryService.start();
+        garupaService.registerPoller(
+            "eventRanking",
+            async (at) => this.refreshAll(at),
+            TOP_HISTORY_V2_ENABLED ? EVENT_TOP_POLL_INTERVAL_MS : EVENT_RANKING_REFRESH_INTERVAL_MS,
+        );
     }
 
     /**
@@ -155,7 +166,7 @@ class EventRankingService {
 
             // Only sync if we don't already have local data
             const existing = await eventTopCollection.findOne({ server, eventId });
-            if (existing) {
+            if (existing || (TOP_HISTORY_V2_ENABLED && (await topHistoryService.store.hasHistory(`${server}/e/${eventId}`)))) {
                 logger("eventRanking", `Bootstrap: already have data for event=${eventId} server=${server}, skipping`);
                 continue;
             }
@@ -259,13 +270,13 @@ class EventRankingService {
      * and refreshes ranking data. Uses {@link Promise.allSettled} so that
      * a failure on one server does not block others.
      */
-    async refreshAll(): Promise<void> {
-        const servers = garupaService.getActiveServerIds();
+    async refreshAll(scheduledAt?: number): Promise<void> {
+        const servers = TOP_HISTORY_V2_ENABLED ? garupaService.getConfiguredServerIds() : garupaService.getActiveServerIds();
         await Promise.allSettled(
             servers.map(async (server) => {
                 const eventId = await eventInfoService.getActiveEventId(server);
                 if (eventId) {
-                    await this.refreshServer(server, eventId);
+                    await this.refreshServer(server, eventId, scheduledAt);
                 } else {
                     await this.refreshPostEndIfNeeded(server);
                 }
@@ -283,7 +294,8 @@ class EventRankingService {
      * @param server  The game server identifier
      * @param eventId The active event ID to fetch rankings for
      */
-    async refreshServer(server: number, eventId: number): Promise<void> {
+    async refreshServer(server: number, eventId: number, scheduledAt?: number): Promise<void> {
+        if (TOP_HISTORY_V2_ENABLED) return this.refreshV2(server, eventId, scheduledAt);
         await garupaService.runWithAvailability(
             server,
             async () => {
@@ -331,6 +343,42 @@ class EventRankingService {
         );
     }
 
+    private async refreshV2(server: number, eventId: number, scheduledAt?: number, endAt?: number): Promise<void> {
+        const boundary = endAt ?? (await eventInfoService.getEventDetail(eventId))?.endAt?.[server] ?? undefined;
+        if (boundary !== undefined && Date.now() >= boundary) endAt = boundary;
+        const intervalMs = endAt === undefined ? EVENT_TOP_POLL_INTERVAL_MS : EVENT_POST_END_POLL_INTERVAL_MS;
+        const raw = await topHistoryService.capture(
+            { server, kind: "event", periodId: eventId },
+            async () => {
+                const eventType = await eventInfoService.getEventType(eventId);
+                if (!eventType) return undefined;
+                return garupaService.runWithAvailability(server, () => fetchEventRanking(server, eventId, eventType, getClientVersion(server)), {
+                    timeoutMs: 2000,
+                    waitForRecovery: false,
+                });
+            },
+            (response) => response.eventPointTopUsers!,
+            { intervalMs, scheduledAt, effectiveAt: boundary },
+        );
+        if (!raw) return;
+        if (boundary !== undefined && Date.now() >= boundary) endAt = boundary;
+        const timestamp = endAt ?? Date.now();
+        this.auxiliaryWrites.run(`${server}/e/${eventId}`, endAt === undefined ? BORDER_PERSIST_INTERVAL_MS : intervalMs, async () => {
+            if (endAt === undefined) await this.persistEventBorderByTier(server, eventId, timestamp, raw);
+            else await this.persistEventBorderByTierReplace(server, eventId, timestamp, raw);
+            const music = raw.musicRankings?.length ? raw.musicRankings : raw.medleyMusicRanking ? [{ ...raw.medleyMusicRanking, musicId: 1 }] : [];
+            for (const item of music) {
+                if (endAt === undefined) {
+                    await this.persistMusicTopSnapshot(server, eventId, item.musicId, timestamp, item);
+                    await this.persistMusicBorderByTier(server, eventId, item.musicId, timestamp, item);
+                } else {
+                    await this.persistMusicTopSnapshotReplace(server, eventId, item.musicId, timestamp, item);
+                    await this.persistMusicBorderByTierReplace(server, eventId, item.musicId, timestamp, item);
+                }
+            }
+        });
+    }
+
     /**
      * Checks for recently-ended events and polls them at reduced post-end frequency.
      * Skips events where the post-end duration has expired or the poll interval hasn't elapsed.
@@ -363,6 +411,7 @@ class EventRankingService {
     private async refreshServerPostEnd(server: number, eventId: number, endAt: number): Promise<void> {
         const key = `${server}-${eventId}`;
         this.postEndLastFetch.set(key, Date.now());
+        if (TOP_HISTORY_V2_ENABLED) return this.refreshV2(server, eventId, undefined, endAt);
 
         await garupaService.runWithAvailability(
             server,
@@ -690,7 +739,8 @@ class EventRankingService {
      * @returns Combined points array and player metadata
      */
     async getEventTopSnapshot(server: number, eventId: number): Promise<EventRankingTopResponse> {
-        return buildTopSnapshot(eventTopCollection, playerCollection, { server, eventId }, server);
+        const legacy = () => buildTopSnapshot(eventTopCollection, playerCollection, { server, eventId }, server);
+        return TOP_HISTORY_V2_ENABLED ? topHistoryService.compatible({ server, kind: "event", periodId: eventId }, legacy) : legacy();
     }
 
     // ========================================================================

@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import type { Context } from "koa";
 
 /**
@@ -16,6 +17,6 @@ export const loggerMiddleware = async (ctx: Context, next: () => Promise<void>) 
     await next();
 
     const ms = Date.now() - start;
-    const size = ctx.body ? (Buffer.byteLength(JSON.stringify(ctx.body)) / 1024).toFixed(2) : 0;
-    console.log(`[${timeString}] [Response] ${ctx.status} ${ms}ms ${size}KB`);
+    const size = ctx.body instanceof Readable ? "stream" : `${ctx.body ? (Buffer.byteLength(JSON.stringify(ctx.body)) / 1024).toFixed(2) : 0}KB`;
+    console.log(`[${timeString}] [Response] ${ctx.status} ${ms}ms ${size}`);
 };

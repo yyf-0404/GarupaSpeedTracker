@@ -129,6 +129,18 @@ export const GARUPA_REFRESH_INTERVAL_SECONDS = toNumber(process.env.GARUPA_REFRE
 /** Second-of-minute offset for timed refreshes. */
 export const GARUPA_REFRESH_AT_SECOND = toNumber(process.env.GARUPA_REFRESH_AT_SECOND, 0);
 
+/** Top history V2: independent events with hourly FULL checkpoints. */
+export const TOP_HISTORY_V2_ENABLED = process.env.TOP_HISTORY_V2_ENABLED === "true";
+export const EVENT_TOP_POLL_INTERVAL_MS = Math.max(1000, toNumber(process.env.EVENT_TOP_POLL_INTERVAL_MS, 10000));
+export const MONTHLY_TOP_POLL_INTERVAL_MS = Math.max(1000, toNumber(process.env.MONTHLY_TOP_POLL_INTERVAL_MS, 10000));
+export const TOP_POLL_PHASE_OFFSET_MS = toNumber(process.env.TOP_POLL_PHASE_OFFSET_MS, 5000);
+export const BORDER_PERSIST_INTERVAL_MS = Math.max(1000, toNumber(process.env.BORDER_PERSIST_INTERVAL_MS, 60000));
+export const GARUPA_HEALTH_CACHE_MS = Math.max(0, toNumber(process.env.GARUPA_HEALTH_CACHE_MS, 30000));
+export const TOP_OUTBOX_DIR = process.env.TOP_OUTBOX_DIR ?? "data/top-outbox";
+export const TOP_OUTBOX_MAX_BYTES = Math.max(1048576, toNumber(process.env.TOP_OUTBOX_MAX_BYTES, 67108864));
+export const MONGODB_TOP_EVENTS_COLLECTION = process.env.MONGODB_TOP_EVENTS_COLLECTION ?? "ranking_top_events_v2";
+export const MONGODB_TOP_HISTORY_META_COLLECTION = process.env.MONGODB_TOP_HISTORY_META_COLLECTION ?? "ranking_top_meta_v2";
+
 // --- Package lookup URLs per server (used to auto-detect client version) ---
 
 /** Per-server App Store lookup URLs for version detection. */

@@ -9,11 +9,12 @@ import {
     getGarupaStatusUnavailabilityThreshold,
     waitUntilGarupaAvailable,
 } from "@/api/garupa";
-import { GARUPA_REFRESH_AT_SECOND, GARUPA_REFRESH_INTERVAL_SECONDS, MONGODB_GARUPA_META_COLLECTION } from "@/config";
+import { GARUPA_HEALTH_CACHE_MS, GARUPA_REFRESH_AT_SECOND, GARUPA_REFRESH_INTERVAL_SECONDS, MONGODB_GARUPA_META_COLLECTION } from "@/config";
 import { logger } from "@/logger";
 import { database } from "@/storage/dataBaseAdapter/mongodb";
 import { downloader } from "@/storage/downloader";
 import type { GarupaMetaDocument } from "@/types/garupaMeta";
+import { AlignedPoller } from "./alignedPoller";
 
 /**
  * Represents the current availability state of a Garupa game server.
@@ -32,18 +33,6 @@ export interface GarupaServerStatus {
 const garupaMetaCollection = database.collection<GarupaMetaDocument>(MONGODB_GARUPA_META_COLLECTION);
 
 /**
- * Represents a registered periodic poller task.
- */
-interface PollerEntry {
-    /** The async function to execute on each poll cycle. */
-    fn: () => Promise<void>;
-    /** Interval in milliseconds between polling executions. */
-    intervalMs: number;
-    /** Timestamp (ms) of the last execution, used to determine if the interval has elapsed. */
-    lastRun: number;
-}
-
-/**
  * Central service for managing Garupa game server connections.
  *
  * Responsibilities include:
@@ -53,7 +42,6 @@ interface PollerEntry {
  * - Managing periodic pollers that execute on aligned intervals.
  */
 class GarupaService {
-    private refreshTimeout: NodeJS.Timeout | undefined;
     private refreshInterval: NodeJS.Timeout | undefined;
     private started = false;
     private initTask: Promise<void> | undefined;
@@ -62,7 +50,8 @@ class GarupaService {
     private disabledServers = new Set<number>();
     private recoveryInFlight = new Map<number, Promise<void>>();
     private versionRefreshInFlight = new Map<number, Promise<void>>();
-    private pollers = new Map<string, PollerEntry>();
+    private healthyUntil = new Map<number, number>();
+    private pollers = new Map<string, AlignedPoller>();
 
     /**
      * Initializes and starts the Garupa service.
@@ -157,12 +146,8 @@ class GarupaService {
      * @param callback - Async function to execute on each poll cycle.
      * @param intervalMs - Optional poll interval in milliseconds; defaults to {@code GARUPA_REFRESH_INTERVAL_SECONDS * 1000}.
      */
-    registerPoller(key: string, callback: () => Promise<void>, intervalMs?: number): void {
-        this.pollers.set(key, {
-            fn: callback,
-            intervalMs: intervalMs ?? GARUPA_REFRESH_INTERVAL_SECONDS * 1000,
-            lastRun: 0,
-        });
+    registerPoller(key: string, callback: (scheduledAt: number) => Promise<void>, intervalMs?: number, phaseMs = GARUPA_REFRESH_AT_SECOND * 1000): void {
+        this.pollers.set(key, new AlignedPoller(callback, intervalMs ?? GARUPA_REFRESH_INTERVAL_SECONDS * 1000, phaseMs));
         this.start();
         this.scheduleNextTick();
     }
@@ -184,7 +169,11 @@ class GarupaService {
      * @param options.timeoutMs - Timeout for the availability health check (default 2000ms).
      * @returns The result of {@code action}, or {@code undefined} if the server is disabled.
      */
-    async runWithAvailability<T>(server: number, action: () => Promise<T>, options?: { timeoutMs?: number }): Promise<T | undefined> {
+    async runWithAvailability<T>(
+        server: number,
+        action: () => Promise<T>,
+        options?: { timeoutMs?: number; waitForRecovery?: boolean },
+    ): Promise<T | undefined> {
         this.start();
         await this.initializeClientVersions();
         const timeoutMs = options?.timeoutMs ?? 2000;
@@ -206,8 +195,13 @@ class GarupaService {
                 );
                 await this.refreshClientVersion(server, "business_426_fallback");
             }
+            this.healthyUntil.delete(server);
             status = await this.assessServerStatus(server, timeoutMs);
             if (!status.available || status.thresholdReached || this.disabledServers.has(server)) {
+                if (options?.waitForRecovery === false) {
+                    void this.waitUntilAvailableWithLogging(server, timeoutMs).catch(() => {});
+                    throw error;
+                }
                 await this.waitUntilAvailableWithLogging(server, timeoutMs);
                 return await action();
             }
@@ -229,10 +223,14 @@ class GarupaService {
      * @returns The current {@link GarupaServerStatus} for the server.
      */
     private async assessServerStatus(server: number, timeoutMs: number = 2000): Promise<GarupaServerStatus> {
+        if ((this.healthyUntil.get(server) ?? 0) > Date.now() && !this.disabledServers.has(server)) {
+            return { available: true, disabled: false, unavailabilityCount: 0, thresholdReached: false };
+        }
         try {
             const ok = await checkGarupaGameStatus(server, this.getClientVersion(server), timeoutMs);
             if (ok) {
                 this.markServerAvailable(server);
+                this.healthyUntil.set(server, Date.now() + GARUPA_HEALTH_CACHE_MS);
                 return {
                     available: true,
                     disabled: false,
@@ -285,76 +283,15 @@ class GarupaService {
         }
     }
 
-    /**
-     * Schedules the first poller execution tick, aligned to a specific wall-clock second.
-     *
-     * Calculates the delay until the next occurrence of {@code GARUPA_REFRESH_AT_SECOND},
-     * sets a one-shot timeout to run pollers, and then starts the regular interval.
-     * If a timeout or interval is already active, this is a no-op.
-     */
+    /** A short clock tick serves independently aligned pollers; each owns its busy guard. */
     private scheduleNextTick(): void {
-        if (this.refreshTimeout || this.refreshInterval) {
-            return;
-        }
-
-        const now = new Date();
-        const next = new Date(now);
-        next.setSeconds(GARUPA_REFRESH_AT_SECOND, 0);
-
-        if (next <= now) {
-            next.setMinutes(next.getMinutes() + 1);
-        }
-
-        const delayMs = Math.max(0, next.getTime() - now.getTime());
-        this.refreshTimeout = setTimeout(() => {
-            void this.runPollers();
-            this.startInterval();
-        }, delayMs);
-        this.refreshTimeout.unref();
-    }
-
-    /**
-     * Starts the periodic poller execution interval.
-     *
-     * Uses {@code GARUPA_REFRESH_INTERVAL_SECONDS} as the interval duration.
-     * If an interval is already running, this is a no-op.
-     * The interval timer is unref'd so it does not keep the process alive.
-     */
-    private startInterval(): void {
-        if (this.refreshInterval) {
-            return;
-        }
-
-        const intervalMs = Math.max(1, GARUPA_REFRESH_INTERVAL_SECONDS) * 1000;
+        if (this.refreshInterval) return;
         this.refreshInterval = setInterval(() => {
-            void this.runPollers();
-        }, intervalMs);
-        this.refreshInterval.unref();
-    }
-
-    /**
-     * Executes all registered poller tasks whose interval has elapsed.
-     *
-     * Iterates over every registered poller, skipping those whose last run
-     * is still within their configured interval. All eligible pollers are
-     * executed concurrently and their results are settled via
-     * {@code Promise.allSettled} (individual failures do not block others).
-     */
-    private async runPollers(): Promise<void> {
-        if (this.pollers.size === 0) {
-            return;
-        }
-
-        const now = Date.now();
-        const tasks: Promise<void>[] = [];
-        for (const [, entry] of this.pollers) {
-            if (now - entry.lastRun < entry.intervalMs) {
-                continue;
+            for (const [name, poller] of this.pollers) {
+                void poller.tick().catch((error) => logger("garupaService", `poller=${name} failed: ${String(error)}`));
             }
-            entry.lastRun = now;
-            tasks.push(entry.fn());
-        }
-        await Promise.allSettled(tasks);
+        }, 250);
+        this.refreshInterval.unref();
     }
 
     /**

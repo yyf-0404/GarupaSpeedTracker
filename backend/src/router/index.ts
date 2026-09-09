@@ -7,6 +7,7 @@ import { playerDeckRouter } from "@/router/playerDeck";
 import { pointTrackerRouter } from "@/router/pointTracker";
 import { songMetadataRouter } from "@/router/songMetadata";
 import { songsRouter } from "@/router/songs";
+import { topHistoryRouter } from "@/router/topHistory";
 
 /**
  * Aggregated Koa router that mounts all sub-routers under the {@link API_PREFIX}.
@@ -29,5 +30,6 @@ router.use(songMetadataRouter.routes(), songMetadataRouter.allowedMethods());
 router.use(monthlyRankingRouter.routes(), monthlyRankingRouter.allowedMethods());
 router.use(eventRankingRouter.routes(), eventRankingRouter.allowedMethods());
 router.use(playerDeckRouter.routes(), playerDeckRouter.allowedMethods());
+router.use(topHistoryRouter.routes(), topHistoryRouter.allowedMethods());
 
 export default router;
