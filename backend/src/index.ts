@@ -27,8 +27,13 @@ const app = createApp();
         logger("migration", `timestamp-to-time failed: ${nodeError.message ?? "unknown error"}`);
     });
 
-    // 3. Bootstrap historical data in parallel (may block if DB unavailable; non-fatal)
-    await Promise.allSettled([eventRankingService.bootstrap(), monthlyRankingService.bootstrap(), songMetadataService.getSongMetadata()]);
+    // Chart downloads may take minutes on a cold cache; ranking collection must not wait for them.
+    void songMetadataService.getSongMetadata().catch((error: unknown) => {
+        logger("mainAPI", `song metadata bootstrap failed: ${(error as Error)?.name ?? "unknown error"}`);
+    });
+
+    // 3. Bootstrap ranking history before starting its pollers to prevent duplicate sampling.
+    await Promise.allSettled([eventRankingService.bootstrap(), monthlyRankingService.bootstrap()]);
 
     // 4. Start background pollers
     monthlyRankingInfoService.start();
