@@ -31,8 +31,8 @@ RUN adduser -D -u 1000 node || true
 # 拷贝阶段 2 的产物
 COPY --from=builder --chown=node:node /app/backend ./
 
-# Docker 初始化命名卷时保留 node 用户对持久化队列目录的写权限。
-RUN mkdir -p /app/data && chown node:node /app/data
+# 允许 node 用户写入下载缓存，以及命名卷中的持久化队列。
+RUN mkdir -p /app/data /app/cache && chown node:node /app/data /app/cache
 
 USER node
 
