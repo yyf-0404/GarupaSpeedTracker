@@ -1,3 +1,4 @@
+import { statusRouter } from "@/router/status";
 import Router from "@koa/router";
 import { API_PREFIX } from "@/config";
 import { eventRouter } from "@/router/event";
@@ -22,6 +23,8 @@ import { topHistoryRouter } from "@/router/topHistory";
  * 7. player deck
  */
 const router = new Router({ prefix: API_PREFIX });
+
+router.use(statusRouter.routes(), statusRouter.allowedMethods());
 
 router.use(pointTrackerRouter.routes(), pointTrackerRouter.allowedMethods());
 router.use(eventRouter.routes(), eventRouter.allowedMethods());

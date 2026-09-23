@@ -1,4 +1,45 @@
 export interface I18nMessages {
+    serviceStatus: {
+        stale: string;
+        noRuns: string;
+        disabled: string;
+        monthlyRankingTask: string;
+        eventRankingTask: string;
+        availability: string;
+        game: string;
+        title: string;
+        loading: string;
+        unavailable: string;
+        refresh: string;
+        refreshing: string;
+        lastUpdated: string;
+        core: string;
+        operational: string;
+        degraded: string;
+        unknown: string;
+        never: string;
+        database: string;
+        garupa0: string;
+        garupa1: string;
+        garupa2: string;
+        garupa3: string;
+        garupa4: string;
+    };
+    hourly: {
+        title: string;
+        empty: string;
+        rank: string;
+        player: string;
+        points: string;
+        gap: string;
+        speed: string;
+        speedRank: string;
+        changes: string;
+        firstBlank: string;
+        lastBlank: string;
+        average: string;
+        partial: string;
+    };
     menu: {
         home: string;
         auto: string;
@@ -161,6 +202,10 @@ export interface I18nMessages {
         };
     };
     settings: {
+        timeZone: string;
+        timeZoneLocal: string;
+        timeZoneBeijing: string;
+        timeZoneJapan: string;
         title: string;
         queryTitle: string;
         tableTitle: string;
@@ -191,6 +236,8 @@ export interface I18nMessages {
         requestSecond: string;
         requestAutoRetryDelaySeconds: string;
         save: string;
+        unsavedChanges: string;
+        discardChanges: string;
     };
     about: {
         title: string;

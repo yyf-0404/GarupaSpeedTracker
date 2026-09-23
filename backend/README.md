@@ -40,6 +40,12 @@ pnpm build
 pnpm start
 ```
 
+## 日志颜色
+
+终端日志按模块着色，并显示日志级别：`INFO` 为普通信息，`SUCCESS` 为绿色，`WARN` 为黄色，`ERROR` 为红色。HTTP 响应中，4xx 显示黄色，5xx 显示红色，其余状态显示绿色。
+
+默认仅在交互式终端启用颜色，重定向到文件时输出纯文本。可通过 `FORCE_COLOR=1` 强制开启（例如 Docker 或管道输出），通过 `NO_COLOR=1` 或 `FORCE_COLOR=0` 关闭；`NO_COLOR` 优先。
+
 ## 后端环境变量说明
 
 只部署后端并连接已有 MongoDB 时，在项目根目录执行：
@@ -205,3 +211,39 @@ GET /api/playerDeckStatus?server=0&playerId=28012549
 ## 前十 10 秒采样
 
 已支持独立的 FULL/PATCH/SAME/GAP 事件存储，每个 UTC 小时首次成功采样写入 FULL 检查点。启用参数、持久化队列、旧历史兼容与新查询接口见 [Top 历史 V2](TOP_HISTORY_V2_DESIGN.md)。运行时须为 `/app/data` 挂载持久卷；旧历史迁移后保留原集合。
+
+### 歌曲主数据与计分等级
+
+歌曲信息直接读取日服 `/suite/master`（AES 解密、BZip2 解压、protobuf 解析）。日服已有字段优先，Bestdori 只补充缺失字段及其他区服名称/时间，谱面 Note 数据仍使用 Bestdori。歌曲和难度列表以日服为准。
+
+需配置 `GARUPA_ENCRYPTION_KEYS`、`GARUPA_ENCRYPTION_IVS` 的第 0 项（日服）；沿用现有配置的编码格式。此接口不需要 UID/UUID。日服地址在未配置 `GARUPA_SERVER_BASES[0]` 时默认使用 `https://api.garupa.jp/api/`，客户端版本从 App Store 查询，失败时使用 `GARUPA_CLIENT_VERSIONS` 的第 0 项。歌曲接口不依赖 MongoDB 初始化。
+
+`playLevel`/谱面 `level` 用于显示，`scoreLevel` 用于分数计算；游戏未设置 `scoreLevel`（缺失或 0）时使用 `playLevel`。例如 Game Changer Expert 显示 Lv29，计分使用 Lv28。
+
+刷新周期沿用 `BESTDORI_SONGS_CHECK_INTERVAL_MS`。旧谱面缓存首次访问会自动迁移，并复用 Note 统计。日服暂时不可用时保留上次日服快照；无日服快照的首次运行会返回错误，不会改用 Bestdori 的显示等级计分。
+
+### 国服帐号密码登录
+
+国服（server=3）首次排名请求通过 B 站 SDK 使用帐号密码登录，再建立游戏会话。月榜和活动榜共享串行的 token/nonce 链，URL 使用登录返回的游戏 UID。榜单 HTTP 请求统一由 `downloader.downloadRaw` 发送，会话层负责登录、串行控制及 token/nonce 更新。HAR 和旧会话凭据不参与登录。
+
+| 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `GARUPA_CN_ACCOUNT` / `GARUPA_CN_PASSWORD` | 空 | B 站 SDK 帐号和密码，启用国服排名时必填 |
+| `GARUPA_CIDS` / `GARUPA_PIDS` / `GARUPA_CLIENT_PLATFORMS` | 沿用各服配置 | 第四项：安卓 `1` / `2` / `Android`；iOS `1000` / `1` / `iOS` |
+| `GARUPA_CN_VERSION_CODE` | `105` | 实测可以省略 |
+| `GARUPA_CN_LOGIN_TIMEOUT_MS` | `30000` | 国服登录流程中每个 HTTP 请求的超时上限（毫秒）：登录前查询游戏版本信息、SDK 获取公钥、SDK 帐号密码登录、游戏登录；每个请求独立计时，默认 30 秒 |
+| `GARUPA_CN_LOGIN_RETRY_MS` | `30000` | 失败后重新登录的最短等待时间（毫秒） |
+
+`GARUPA_CN_LOGIN_TIMEOUT_MS` 从每个登录相关 HTTP 请求发起时开始计时，覆盖连接、等待响应和读取响应体；超时会中止请求并丢弃当前会话。它不限制整套登录／爬取流程的总时长，也不包含排队时间。国服榜单请求沿用通用的 `DOWNLOADER_TIMEOUT_MS`（默认 10000 毫秒），不受此登录超时配置影响。iTunes 版本查询及其他通用下载器请求也不使用此配置。
+
+登录前从 application 获取 data/master 版本，并检查客户端版本是否匹配。版本号查询不会自动更新 Android versionCode。
+
+会话仅每次启动时保存在内存中，重启后重新登录。请求失败或超时时丢弃会话；成功响应有非空 token/nonce 才更新对应状态，缺失或空值保留旧值，冷却后由下次排名请求重新登录。SDK 返回需要验证码时明确报错并停止本次登录，暂不支持验证码提交或续登（TODO）。
+
+国服无需手填 UID、UUID。同一帐号建议只运行一个采集进程，避免不同会话互相影响。
+
+设备参数的填写说明见 `.env.example`。可留空的设备标识按以下规则处理：
+
+- `GARUPA_CN_BUVID`：根据 `GARUPA_CN_DEVICE_ID` 生成，要求设备 ID 为 32 位十六进制字符串。
+- `GARUPA_CN_SDK_UDID`：复用 BUVID。
+- `GARUPA_CN_BD_ID`：随机生成，当前进程内复用，重启后重新生成。建议填写官方客户端成功登录请求中的 `bd_id`；随机值可能触发验证码。

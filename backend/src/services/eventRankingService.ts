@@ -178,7 +178,7 @@ class EventRankingService {
                 const topUrl = `${BESTDORI_API}eventtop/data?server=${server}&event=${eventId}`;
                 const topData = await downloader.download<EventRankingTopResponse>(topUrl);
                 if (!topData.points || topData.points.length === 0) {
-                    logger("eventRanking", `Bootstrap: Bestdori returned empty top data for event=${eventId}`);
+                    logger("eventRanking", `Bootstrap: Bestdori returned empty top data for event=${eventId}`, "warn");
                     continue;
                 }
 
@@ -239,7 +239,7 @@ class EventRankingService {
                     `Bootstrap: seeded event=${eventId} server=${server} points=${topData.points.length} users=${topData.users?.length ?? 0} tiers=${EVENT_RANKING_BORDER_TIERS.length}`,
                 );
             } catch (err) {
-                logger("eventRanking", `Bootstrap: failed for event=${eventId} server=${server}: ${(err as Error)?.message || err}`);
+                logger("eventRanking", `Bootstrap: failed for event=${eventId} server=${server}: ${(err as Error)?.message || err}`, "error");
             }
         }
     }
@@ -252,7 +252,7 @@ class EventRankingService {
             } catch (err: unknown) {
                 const message = (err as { message?: string })?.message ?? String(err);
                 if (message.includes("Topology is closed") || message.includes("ECONNREFUSED") || message.includes("closed")) {
-                    logger("eventRanking", `${label} failed (${message}), waiting for DB recovery...`);
+                    logger("eventRanking", `${label} failed (${message}), waiting for DB recovery...`, "warn");
                     await database.ready();
                     continue;
                 }
@@ -302,8 +302,8 @@ class EventRankingService {
                 const clientVersion = getClientVersion(server);
                 const eventType = await eventInfoService.getEventType(eventId);
                 if (!eventType) {
-                    logger("eventRanking", `eventId=${eventId} has no eventType, skipping`);
-                    return;
+                    logger("eventRanking", `eventId=${eventId} has no eventType, skipping`, "warn");
+                    return false;
                 }
 
                 // 1. Fetch event point ranking (without mid)
@@ -339,7 +339,7 @@ class EventRankingService {
 
                 logger("eventRanking", `stored event=${eventId} server=${server} type=${eventType}`);
             },
-            { timeoutMs: 2000 },
+            { timeoutMs: 2000, statusTask: "eventRankingTask" },
         );
     }
 
@@ -355,6 +355,7 @@ class EventRankingService {
                 return garupaService.runWithAvailability(server, () => fetchEventRanking(server, eventId, eventType, getClientVersion(server)), {
                     timeoutMs: 2000,
                     waitForRecovery: false,
+                    statusTask: "eventRankingTask",
                 });
             },
             (response) => response.eventPointTopUsers!,
@@ -419,8 +420,8 @@ class EventRankingService {
                 const clientVersion = getClientVersion(server);
                 const eventType = await eventInfoService.getEventType(eventId);
                 if (!eventType) {
-                    logger("eventRanking", `post-end: eventId=${eventId} has no eventType, skipping`);
-                    return;
+                    logger("eventRanking", `post-end: eventId=${eventId} has no eventType, skipping`, "warn");
+                    return false;
                 }
 
                 const raw = await fetchEventRanking(server, eventId, eventType, clientVersion);
@@ -452,7 +453,7 @@ class EventRankingService {
 
                 logger("eventRanking", `post-end stored event=${eventId} server=${server} type=${eventType}`);
             },
-            { timeoutMs: 2000 },
+            { timeoutMs: 2000, statusTask: "eventRankingTask" },
         );
     }
 

@@ -1,6 +1,8 @@
 .env
+.DS_Store
 example/
 .idea
 node_modules
 /.proxyai/
 /.playwright-mcp/
+.pnpm-store/

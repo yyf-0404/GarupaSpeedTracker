@@ -7,7 +7,7 @@
     "description": "",
     "main": "index.js",
     "scripts": {
-        "dev": "nodemon --ignore cache/** --ignore cache/**/*.tmp --ignore data/** --exec ts-node -r tsconfig-paths/register src/index.ts",
+        "dev": "nodemon --ignore \"cache/**\" --ignore \"cache/**/*.tmp\" --ignore \"data/**\" --exec \"ts-node -r tsconfig-paths/register\" src/index.ts",
         "test": "jest --runInBand",
         "test:bestdori-chart-parser": "jest --runInBand src/parsers/BestdoriChartParser.test.ts",
         "build": "tsc && tsc-alias",
@@ -30,7 +30,8 @@
         "koa": "^3.2.0",
         "koa-parameter": "^3.0.1",
         "mongodb": "^6.21.0",
-        "p-limit": "^3.1.0"
+        "p-limit": "^3.1.0",
+        "seek-bzip": "^2.0.0"
     },
     "devDependencies": {
         "@biomejs/biome": "2.4.12",
